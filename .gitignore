@@ -1,0 +1,11 @@
+.env
+credentials.json
+token.json
+__pycache__/
+*.pyc
+*.png
+*.html
+logs/
+detail_*.html
+search_*.html
+update_failed_*.html
