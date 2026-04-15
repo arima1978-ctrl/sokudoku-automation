@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 
 import gspread
@@ -31,6 +32,8 @@ COL_AGENT = 6
 COL_CONTACT_NAME = 8
 COL_MEMBER_TYPE = 11
 COL_STATUS = 12
+COL_TRIAL_APPLY = 13        # M列: 体験申込日
+COL_TRIAL_START = 17        # Q列: お試し(体験)開始日
 COL_PHONE = 22
 COL_ADDRESS = 23
 COL_EMAIL = 24
@@ -105,13 +108,20 @@ def write_entry(
     entry: dict,
     juku_id: str,
     mobile: str = "",
+    issue_date: str | None = None,
     dry_run: bool = False,
 ) -> tuple[bool, str]:
     """エントリをマスターに転記。重複時はスキップ。
 
+    Args:
+        issue_date: ID発行日 (yyyy/mm/dd)。None なら今日。
+                    体験申込日 / お試し(体験)開始日 に入る。
+
     Returns:
         (transferred, message): 転記した場合 True / スキップは False
     """
+    if issue_date is None:
+        issue_date = datetime.now().strftime("%Y/%m/%d")
     client = _get_client()
     if client is None:
         return False, "認証情報なし"
@@ -144,6 +154,8 @@ def write_entry(
         (COL_CONTACT_NAME, entry.get("contact_name", "")),
         (COL_MEMBER_TYPE, map_member_type(entry.get("contract_type", ""))),
         (COL_STATUS, DEFAULT_STATUS),
+        (COL_TRIAL_APPLY, issue_date),
+        (COL_TRIAL_START, issue_date),
         (COL_PHONE, phone),
         (COL_ADDRESS, entry.get("address", "")),
         (COL_EMAIL, email),
