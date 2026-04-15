@@ -34,6 +34,7 @@ COL_MEMBER_TYPE = 11
 COL_STATUS = 12
 COL_TRIAL_APPLY = 13        # M列: 体験申込日
 COL_TRIAL_START = 17        # Q列: お試し(体験)開始日
+COL_REMARK = 21             # U列: 備考
 COL_PHONE = 22
 COL_ADDRESS = 23
 COL_EMAIL = 24
@@ -156,6 +157,7 @@ def write_entry(
         (COL_STATUS, DEFAULT_STATUS),
         (COL_TRIAL_APPLY, issue_date),
         (COL_TRIAL_START, issue_date),
+        (COL_REMARK, DEFAULT_STATUS),
         (COL_PHONE, phone),
         (COL_ADDRESS, entry.get("address", "")),
         (COL_EMAIL, email),
