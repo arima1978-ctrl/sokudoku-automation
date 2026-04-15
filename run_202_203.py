@@ -6,6 +6,7 @@
 import sys
 
 import main as m
+import master_list_writer
 import telegram_approval as tg
 from update_password import fetch_edit_form
 from main import (
@@ -14,6 +15,17 @@ from main import (
     sokudoku_register_juku, send_welcome_email,
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
 )
+
+
+def _transfer_to_master(entry: dict, juku_id: str) -> None:
+    try:
+        ok, msg = master_list_writer.write_entry(
+            entry, juku_id, mobile=entry.get("mobile", "")
+        )
+        prefix = "マスター転記" if ok else "マスター転記スキップ"
+        print(f"  {prefix}: {msg}")
+    except Exception as e:
+        print(f"  マスター転記 失敗: {e}")
 
 
 def build_update_approval_text(entry: dict, juku_id: str, current_info: dict, new_password: str) -> str:
@@ -109,6 +121,7 @@ def handle_row_202(session, entry: dict) -> bool:
         "contact_name": after["contact_name"],
     }
     send_welcome_email(mail_entry, juku_id, new_password)
+    _transfer_to_master(entry, juku_id)
     tg.send_info(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
                  f"✉️ 行{entry['row_index']}: <b>{after['juku_name']}</b> PW変更+メール送信完了\n塾ID: <code>{juku_id}</code>\nPW: <code>{new_password}</code>")
     return True
@@ -146,6 +159,7 @@ def handle_row_203(session, entry: dict) -> bool:
 
     # メール送信
     send_welcome_email(entry, juku_id, password)
+    _transfer_to_master(entry, juku_id)
     tg.send_info(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
                  f"✉️ 行{entry['row_index']}: <b>{entry['juku_name']}</b> 登録+メール送信完了\n塾ID: <code>{juku_id}</code>\nPW: <code>{password}</code>")
     return True
