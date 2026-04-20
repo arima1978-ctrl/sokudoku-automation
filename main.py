@@ -159,7 +159,6 @@ def get_pending_entries(
             "address": address,
             "prefecture": extract_prefecture(address),
             "tel": row[COL_TEL].strip(),
-            "mobile": row[COL_CONTACT_MOBILE].strip() if len(row) > COL_CONTACT_MOBILE else "",
             "contact_name": row[COL_CONTACT_NAME].strip(),
             "contract_type": contract,
             "culture_kids_flg": map_contract_type(contract),
@@ -198,45 +197,73 @@ def _safe_get_value(driver: webdriver.Chrome, element_id: str) -> str:
         return ""
 
 
-def anyschool_search_by_school_name(driver: webdriver.Chrome, juku_name: str) -> dict | None:
-    """検索して家族コード + 照合用情報を返す(先頭ヒットを採用)"""
+_SEARCH_FIELD_IDS = (
+    "FRM_CPH_txtStId", "FRM_CPH_txtName", "FRM_CPH_txtKana",
+    "FRM_CPH_txtSchool", "FRM_CPH_txtGaku2",
+    "FRM_CPH_txtParent", "FRM_CPH_txtBirth",
+)
+
+
+def _clear_search_fields(driver: webdriver.Chrome) -> None:
+    for fid in _SEARCH_FIELD_IDS:
+        try:
+            driver.find_element(By.ID, fid).clear()
+        except Exception:
+            pass
+
+
+def anyschool_list_candidates_by_name(driver: webdriver.Chrome, juku_name: str) -> list[dict]:
+    """txtName(生徒氏名)で漢字検索し、全候補の詳細情報を返す。
+    anyschool の学校名欄(txtSchool)はフリガナ検索のため漢字が通らない。
+    対して生徒氏名欄(txtName)は漢字部分一致が効くので、こちらで検索する。
+    """
     driver.execute_script("moveToUserList();")
     time.sleep(5)
     WebDriverWait(driver, 10).until(
-        EC.presence_of_element_located((By.ID, "FRM_CPH_txtSchool"))
+        EC.presence_of_element_located((By.ID, "FRM_CPH_txtName"))
     )
+    _clear_search_fields(driver)
 
-    school_field = driver.find_element(By.ID, "FRM_CPH_txtSchool")
-    school_field.clear()
-    school_field.send_keys(juku_name)
-    driver.find_element(By.ID, "FRM_CPH_btnSchoolSearch").click()
+    name_field = driver.find_element(By.ID, "FRM_CPH_txtName")
+    name_field.clear()
+    name_field.send_keys(juku_name)
+    driver.find_element(By.ID, "FRM_CPH_btnNameSearch").click()
     time.sleep(3)
 
     detail_links = driver.find_elements(By.XPATH, "//a[contains(@href, 'user_manager')]")
-    candidate_count = len(detail_links)
     if not detail_links:
-        print(f"    anyschool: '{juku_name}' が見つかりません")
-        return None
+        print(f"    anyschool: '{juku_name}' 候補 0件")
+        return []
 
-    detail_links[0].click()
-    time.sleep(3)
+    print(f"    anyschool: '{juku_name}' 候補 {len(detail_links)}件 → 詳細確認中…")
+    results: list[dict] = []
+    for i in range(len(detail_links)):
+        # 戻った後にリンクのDOM参照が切れるため毎回再取得
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "FRM_CPH_txtName"))
+        )
+        detail_links = driver.find_elements(By.XPATH, "//a[contains(@href, 'user_manager')]")
+        if i >= len(detail_links):
+            break
+        detail_links[i].click()
+        time.sleep(2)
 
-    family_code = _safe_get_value(driver, "FRM_CPH_txtManCode")
-    if not family_code:
-        print(f"    anyschool: 家族コードが空です")
-        return None
+        family_code = _safe_get_value(driver, "FRM_CPH_txtManCode")
+        if family_code:
+            results.append({
+                "family_code": family_code,
+                "school_name": _safe_get_value(driver, "FRM_CPH_txtSchoolName"),
+                "tel": _safe_get_value(driver, "FRM_CPH_txtTel"),
+                "address": _safe_get_value(driver, "FRM_CPH_txtAddress"),
+                "email": _safe_get_value(driver, "FRM_CPH_txtMail"),
+                "search_term": juku_name,
+            })
+        else:
+            print(f"    anyschool: (候補{i+1}件目 家族コード空)")
 
-    info = {
-        "family_code": family_code,
-        "school_name": _safe_get_value(driver, "FRM_CPH_txtSchoolName"),
-        "tel": _safe_get_value(driver, "FRM_CPH_txtTel"),
-        "address": _safe_get_value(driver, "FRM_CPH_txtAddress"),
-        "email": _safe_get_value(driver, "FRM_CPH_txtMail"),
-        "candidate_count": candidate_count,
-        "search_term": juku_name,
-    }
-    print(f"    anyschool: 家族コード = {family_code} (候補{candidate_count}件, 検索語='{juku_name}')")
-    return info
+        driver.back()
+        time.sleep(2)
+    return results
 
 
 # ----- Task 3: スマート検索 -----
@@ -284,36 +311,93 @@ def _norm_email(s: str) -> str:
     return (s or "").strip().lower()
 
 
+def _score_match(entry: dict, info: dict) -> tuple[int, list[str]]:
+    """申込データ(entry) と anyschool候補(info) を 4項目で照合する。
+
+    判定ルール:
+      塾名 ... 申込の juku_name と anyschool の school_name が完全一致
+      メール ... 小文字化して完全一致
+      電話  ... 数字のみ抽出して完全一致
+      住所  ... 先頭20文字が完全一致
+
+    戻り値: (一致件数, 一致項目ラベルのリスト)
+    """
+    flags: list[str] = []
+
+    entry_name = (entry.get("juku_name") or "").strip()
+    info_name = (info.get("school_name") or "").strip()
+    if entry_name and info_name and entry_name == info_name:
+        flags.append("塾名")
+
+    e_email = _norm_email(entry.get("email"))
+    i_email = _norm_email(info.get("email"))
+    if e_email and i_email and e_email == i_email:
+        flags.append("メール")
+
+    e_tel = _norm_tel(entry.get("tel"))
+    i_tel = _norm_tel(info.get("tel"))
+    if e_tel and i_tel and e_tel == i_tel:
+        flags.append("電話")
+
+    e_addr = (entry.get("address") or "")[:20]
+    i_addr = (info.get("address") or "")[:20]
+    if e_addr and i_addr and e_addr == i_addr:
+        flags.append("住所")
+
+    return len(flags), flags
+
+
 def anyschool_smart_search(driver: webdriver.Chrome, entry: dict) -> dict | None:
-    """塾名フル→短縮→部分 の順で検索し、候補をメール/TELで検証。
-    戻り値: anyschool_info + verification dict"""
-    candidates = _trim_juku_name(entry["juku_name"])
-    print(f"    anyschool: 検索候補 = {candidates}")
+    """塾名候補群で anyschool を検索し、4項目照合の最高スコア候補を返す。
 
-    for cand in candidates:
-        info = anyschool_search_by_school_name(driver, cand)
-        if info:
-            # 検証スコアリング
-            entry_email = _norm_email(entry.get("email", ""))
-            entry_tel = _norm_tel(entry.get("tel", ""))
-            anyschool_email = _norm_email(info.get("email", ""))
-            anyschool_tel = _norm_tel(info.get("tel", ""))
+    戻り値 info dict には以下が含まれる:
+      family_code, school_name, tel, address, email, search_term,
+      match_flags (一致項目ラベル),
+      score       (0-4, 一致項目数),
+      confidence  (high=3以上 / mid=2 / low=1以下),
+      candidate_count (ユニーク候補総数)
 
-            match_flags = []
-            if anyschool_email and entry_email and anyschool_email == entry_email:
-                match_flags.append("email一致")
-            if anyschool_tel and entry_tel and anyschool_tel == entry_tel:
-                match_flags.append("TEL一致")
-            # 住所一致(先頭20文字)
-            if info.get("address", "")[:20] and entry.get("address", "")[:20] \
-                    and info["address"][:20] == entry["address"][:20]:
-                match_flags.append("住所一致")
+    候補が 0 件の場合は None を返す。スコアが低い候補も含めて返す点に注意
+    (Telegram で人間が最終判断するため)。
+    """
+    terms = _trim_juku_name(entry["juku_name"])
+    print(f"    anyschool: 検索候補 = {terms}")
 
-            info["match_flags"] = match_flags
-            info["confidence"] = "high" if match_flags else "low"
-            return info
+    # family_code をキーにしてユニーク化
+    all_found: dict[str, dict] = {}
+    for term in terms:
+        cands = anyschool_list_candidates_by_name(driver, term)
+        for c in cands:
+            fc = c["family_code"]
+            if fc not in all_found:
+                all_found[fc] = c
+        # フル塾名で1件だけヒットしたら短縮検索は不要
+        if term == terms[0] and len(cands) == 1:
+            break
 
-    return None
+    if not all_found:
+        return None
+
+    scored: list[dict] = []
+    for info in all_found.values():
+        score, flags = _score_match(entry, info)
+        scored.append({**info, "match_flags": flags, "score": score})
+    scored.sort(key=lambda x: -x["score"])
+
+    top = dict(scored[0])
+    top["candidate_count"] = len(scored)
+    top["all_candidates"] = scored
+    if top["score"] >= 3:
+        top["confidence"] = "high"
+    elif top["score"] >= 2:
+        top["confidence"] = "mid"
+    else:
+        top["confidence"] = "low"
+
+    flags_text = ", ".join(top["match_flags"]) if top["match_flags"] else "なし"
+    print(f"    anyschool: 最良候補 家族コード={top['family_code']} "
+          f"スコア={top['score']}/4 ({flags_text}) 信頼度={top['confidence']}")
+    return top
 
 
 # ===================== 100mil-sokudoku (requests) =====================
@@ -620,19 +704,6 @@ def _write_status(row_index: int, mode: str, juku_id: str) -> None:
         print(f"    STATUS書き戻し 失敗: {e}")
 
 
-def _transfer_to_master(entry: dict, juku_id: str) -> None:
-    """マスターシートへ転記。重複時はスキップ。失敗してもログのみ"""
-    try:
-        import master_list_writer
-        ok, msg = master_list_writer.write_entry(
-            entry, juku_id, mobile=entry.get("mobile", "")
-        )
-        prefix = "マスター転記" if ok else "マスター転記スキップ"
-        print(f"    {prefix}: {msg}")
-    except Exception as e:
-        print(f"    マスター転記 失敗: {e}")
-
-
 def _esc_html(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -642,11 +713,15 @@ def _build_approval_text(entry: dict, info: dict, juku_id: str, password: str) -
     esc = _esc_html
 
     match_flags = info.get("match_flags", [])
+    score = info.get("score", 0)
+    confidence = info.get("confidence", "low")
     warnings = []
     if info.get("candidate_count", 0) > 1:
-        warnings.append(f"⚠️ anyschool候補 {info['candidate_count']}件 (1件目採用)")
-    if info.get("confidence") == "low":
-        warnings.append("⚠️ メール/TEL/住所いずれも一致せず")
+        warnings.append(f"⚠️ anyschool候補 {info['candidate_count']}件 (最良スコアを採用)")
+    if confidence == "low":
+        warnings.append(f"⚠️ 照合一致 {score}/4 項目（低信頼度）慎重に確認してください")
+    elif confidence == "mid":
+        warnings.append(f"⚠️ 照合一致 {score}/4 項目（中信頼度）")
 
     lines = [
         f"<b>【新規登録 承認依頼】行{entry['row_index']}</b>",
@@ -667,7 +742,9 @@ def _build_approval_text(entry: dict, info: dict, juku_id: str, password: str) -
         f"家族コード: <code>{esc(juku_id)}</code>",
     ]
     if match_flags:
-        lines.append(f"照合: ✅ {', '.join(match_flags)}")
+        lines.append(f"照合: ✅ {', '.join(match_flags)} ({score}/4項目一致)")
+    else:
+        lines.append("照合: ❌ 4項目とも不一致")
     lines += [
         "",
         "<b>■ 登録予定</b>",
@@ -831,7 +908,6 @@ def main() -> None:
                     result["mode"] = "updated" if password_changed else "resent"
                     result["success"] = True
                     _write_status(entry["row_index"], result["mode"], juku_id)
-                    _transfer_to_master(entry, juku_id)
                     if use_telegram:
                         action = "PW変更+再送" if password_changed else "メール再送"
                         tg.send_info(
@@ -881,7 +957,6 @@ def main() -> None:
 
                 result["success"] = True
                 _write_status(entry["row_index"], "registered", juku_id)
-                _transfer_to_master(entry, juku_id)
 
                 if use_telegram:
                     tg.send_info(
