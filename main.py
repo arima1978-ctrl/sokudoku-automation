@@ -159,6 +159,7 @@ def get_pending_entries(
             "address": address,
             "prefecture": extract_prefecture(address),
             "tel": row[COL_TEL].strip(),
+            "mobile": row[COL_CONTACT_MOBILE].strip() if len(row) > COL_CONTACT_MOBILE else "",
             "contact_name": row[COL_CONTACT_NAME].strip(),
             "contract_type": contract,
             "culture_kids_flg": map_contract_type(contract),
@@ -704,6 +705,19 @@ def _write_status(row_index: int, mode: str, juku_id: str) -> None:
         print(f"    STATUS書き戻し 失敗: {e}")
 
 
+def _transfer_to_master(entry: dict, juku_id: str) -> None:
+    """マスターシートへ転記。重複時はスキップ。失敗してもログのみ"""
+    try:
+        import master_list_writer
+        ok, msg = master_list_writer.write_entry(
+            entry, juku_id, mobile=entry.get("mobile", "")
+        )
+        prefix = "マスター転記" if ok else "マスター転記スキップ"
+        print(f"    {prefix}: {msg}")
+    except Exception as e:
+        print(f"    マスター転記 失敗: {e}")
+
+
 def _esc_html(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -908,6 +922,7 @@ def main() -> None:
                     result["mode"] = "updated" if password_changed else "resent"
                     result["success"] = True
                     _write_status(entry["row_index"], result["mode"], juku_id)
+                    _transfer_to_master(entry, juku_id)
                     if use_telegram:
                         action = "PW変更+再送" if password_changed else "メール再送"
                         tg.send_info(
@@ -957,6 +972,7 @@ def main() -> None:
 
                 result["success"] = True
                 _write_status(entry["row_index"], "registered", juku_id)
+                _transfer_to_master(entry, juku_id)
 
                 if use_telegram:
                     tg.send_info(
